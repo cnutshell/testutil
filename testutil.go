@@ -137,6 +137,13 @@ func (t *testCluster) Start() error {
 		return nil
 	}
 
+	// start heartbeat for dn store
+	for _, ds := range t.dn.stores {
+		if err := ds.Start(); err != nil {
+			return err
+		}
+	}
+
 	// start hearbeat for log store
 	for _, ls := range t.log.stores {
 		if err := ls.Start(); err != nil {
@@ -144,7 +151,6 @@ func (t *testCluster) Start() error {
 		}
 	}
 
-	// TODO: whether bootstrap or not after restart
 	bootstrap := func() {
 		var err error
 		defer func() {
@@ -181,8 +187,8 @@ func (t *testCluster) Start() error {
 			return
 		}
 
+		// FIXME: get rid of bootstrap
 		leader.Bootstrap(term, state)
-
 	}
 
 	// do bootstrap only once
@@ -192,13 +198,6 @@ func (t *testCluster) Start() error {
 	err := <-t.bootstrap.errChan
 	if err != nil {
 		return err
-	}
-
-	// start dn store
-	for _, ds := range t.dn.stores {
-		if err := ds.Start(); err != nil {
-			return err
-		}
 	}
 
 	t.mu.running = true

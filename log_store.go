@@ -18,6 +18,7 @@ type LogStore interface {
 	GetClusterState() (*logpb.CheckerState, error)
 	// SetInitialClusterInfo sets cluster initialize state.
 	SetInitialClusterInfo(numOfLogShards, numOfDNShards, numOfLogReplicas uint64) error
+	// FIXME: get rid of Bootstrap, Service would do this job internally.
 	// Bootstrap would bootstrap cluster according to its initialize state.
 	Bootstrap(term uint64, state *logpb.CheckerState)
 }

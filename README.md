@@ -52,4 +52,6 @@
 - [x] 增加用于测试验证的方法
 - [ ] integrate with real log store
 - [ ] integrate with real dn store
-- [ ] 是否考虑并发安全
+- [ ] 是否需要并发安全
+- [ ] FIX: get rid of Bootstrap, Service would do this job internally.
+- [x] FIX: start store first, then bootstrap
