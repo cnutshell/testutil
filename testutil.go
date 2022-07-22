@@ -3,65 +3,116 @@ package testutil
 import (
 	"sync"
 	"testing"
+	"time"
+
+	logpb "github.com/matrixorigin/matrixone/pkg/pb/logservice"
+
+	"github.com/google/uuid"
 )
 
-type DnStore interface {
-	Start()
-	Stop()
-
-	ID() string
-}
-
-type LogStore interface {
-	Start()
-	Stop()
-
-	ID() string
-}
-
-// FIXME: verification utilities
-// FIXME: integrate with real log store
-// FIXME: integrate with real dn store
 type TestCluster interface {
 	// Start starts stores sequentially
-	Start()
+	Start() error
 	// Stop stops stores sequentially
-	Stop()
+	Stop() error
 
-	// RegisterDnStore registers dn stores
-	RegisterDnStore(stores ...DnStore) error
-	// GetDnStore fetches dn store instance
-	GetDnStore(storeID string) (DnStore, error)
+	// TestOperation
+	// TestAwareness
+	// TestAssertState
+	// TestWaitState
+}
 
-	// RegisterLogStore registers log stores
-	RegisterLogStore(stores ...LogStore) error
-	// GetLogStore fetches log store instance
-	GetLogStore(storeID string) (LogStore, error)
+// TestOperation supports cluster operation
+type TestOperation interface {
+	StopDnStore(storeID string) error
+	StartDnStore(storeID string) error
+
+	StopLogStore(storeID string) error
+	StartLogStore(storeID string) error
 
 	/*
-		StartNetworkPartition(partitions [][]int)
-		StopNetworkPartition()
+		StartNetworkPartition(partitions [][]int) error
+		StopNetworkPartition() error
 	*/
 }
 
-func NewTestCluster(t *testing.T, dnStores []DnStore, logStores []LogStore) (TestCluster, error) {
-	c := &testCluster{}
+// TestAwareness provides cluster information.
+type TestAwareness interface {
+	// ListDnStores lists all dn stores
+	ListDnStores() []string
+	// ListLogStores lists all log stores
+	ListLogStores() []string
 
+	// GetDnStore fetches dn store instance
+	GetDnStore(storeID string) (DnStore, error)
+	// GetLogStore fetches log store instance
+	GetLogStore(storeID string) (LogStore, error)
+	// GetClusterState fetches current cluster state
+	GetClusterState() (*logpb.CheckerState, error)
+}
+
+// TestAssertState asserts current cluster state.
+type TestAssertState interface {
+	AssertDnShardCount(t *testing.T, expected int)
+	AssertDnReplicaCount(t *testing.T, shardID uint64, expected int)
+
+	AssertLogShardCount(t *testing.T, expected int)
+	AssertLogReplicaCount(t *testing.T, shardID uint64, expected int)
+
+	AssertLeaderHakeeperState(t *testing.T, expeted logpb.HAKeeperState)
+}
+
+// TestWaitState waits cluster state until timeout.
+type TestWaitState interface {
+	WaitDnShardByCount(count int, timeout time.Duration)
+	WaitDnReplicaByCount(shardID uint64, count int, timeout time.Duration)
+
+	WaitLogShardByCount(count int, timeout time.Duration)
+	WaitLogReplicaByCount(shardID uint64, count int, timeout time.Duration)
+}
+
+func NewTestCluster(t *testing.T, opt Options) (TestCluster, error) {
+	validateOptions(&opt)
+
+	c := &testCluster{
+		opt: opt,
+	}
 	c.dn.stores = make(map[string]DnStore)
 	c.log.stores = make(map[string]LogStore)
+	c.bootstrap.errChan = make(chan error, 1)
 
-	if err := c.registerDnStores(dnStores...); err != nil {
-		return nil, err
+	// construct dn stores
+	for i := 0; i < opt.dnStoreCount; i++ {
+		// FIXME: integrate with real dn store
+		ds := newDnStore()
+		id := ds.ID()
+		if _, ok := c.dn.stores[id]; ok {
+			return nil, wrappedError(ErrStoreDuplicated, id)
+		}
+		c.dn.stores[id] = ds
 	}
 
-	if err := c.registerLogStores(logStores...); err != nil {
-		return nil, err
+	// construct log stores
+	for i := 0; i < opt.logStoreCount; i++ {
+		// FIXME: integrate with real log store
+		ls := newLogStore()
+		id := ls.ID()
+		if _, ok := c.log.stores[id]; ok {
+			return nil, wrappedError(ErrStoreDuplicated, id)
+		}
+		c.log.stores[id] = ls
 	}
-
 	return c, nil
 }
 
 type testCluster struct {
+	opt Options
+
+	bootstrap struct {
+		sync.Once
+		errChan chan error
+	}
+
 	dn struct {
 		sync.Mutex
 		stores map[string]DnStore
@@ -78,76 +129,104 @@ type testCluster struct {
 	}
 }
 
-func (t *testCluster) registerDnStores(stores ...DnStore) error {
-	t.dn.Lock()
-	defer t.dn.Unlock()
-
-	for _, s := range stores {
-		id := s.ID()
-		if _, ok := t.dn.stores[id]; ok {
-			return wrappedError(ErrStoreDuplicated, id)
-		}
-		t.dn.stores[id] = s
-	}
-
-	return nil
-}
-
-func (t *testCluster) registerLogStores(stores ...LogStore) error {
-	t.log.Lock()
-	defer t.log.Unlock()
-
-	for _, s := range stores {
-		id := s.ID()
-		if _, ok := t.log.stores[id]; ok {
-			return wrappedError(ErrStoreDuplicated, id)
-		}
-		t.log.stores[id] = s
-	}
-
-	return nil
-}
-
-func (t *testCluster) Start() {
+func (t *testCluster) Start() error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
 	if t.mu.running {
-		return
+		return nil
 	}
 
-	for _, ds := range t.dn.stores {
-		ds.Start()
-	}
-
+	// start hearbeat for log store
 	for _, ls := range t.log.stores {
-		ls.Start()
+		if err := ls.Start(); err != nil {
+			return err
+		}
+	}
+
+	// TODO: whether bootstrap or not after restart
+	bootstrap := func() {
+		var err error
+		defer func() {
+			t.bootstrap.errChan <- err
+		}()
+
+		var leader LogStore
+		var term uint64
+		for _, ls := range t.log.stores {
+			if isLeader, currTerm, _ := ls.IsLeaderHakeeper(); isLeader {
+				leader = ls
+				term = currTerm
+				break
+			}
+		}
+
+		if leader == nil {
+			err = ErrNoLeaderHakeeper
+			return
+		}
+
+		// set cluster initialized state
+		err = leader.SetInitialClusterInfo(
+			t.opt.logShardCount,
+			t.opt.dnShardCount,
+			t.opt.logReplicaNum,
+		)
+		if err != nil {
+			return
+		}
+
+		state, err := leader.GetClusterState()
+		if err != nil {
+			return
+		}
+
+		leader.Bootstrap(term, state)
+
+	}
+
+	// do bootstrap only once
+	t.bootstrap.Do(bootstrap)
+
+	// check bootstrap error
+	err := <-t.bootstrap.errChan
+	if err != nil {
+		return err
+	}
+
+	// start dn store
+	for _, ds := range t.dn.stores {
+		if err := ds.Start(); err != nil {
+			return err
+		}
 	}
 
 	t.mu.running = true
+	return nil
 }
 
-func (t *testCluster) Stop() {
+func (t *testCluster) Stop() error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
 	if !t.mu.running {
-		return
+		return nil
 	}
 
 	for _, ds := range t.dn.stores {
-		ds.Stop()
+		if err := ds.Stop(); err != nil {
+			return err
+		}
 	}
 
 	for _, ls := range t.log.stores {
-		ls.Stop()
+		if err := ls.Stop(); err != nil {
+			return err
+		}
 	}
 
 	t.mu.running = false
-}
-
-func (t *testCluster) RegisterDnStore(stores ...DnStore) error {
-	return t.registerDnStores(stores...)
+	return nil
 }
 
 func (t *testCluster) GetDnStore(storeID string) (DnStore, error) {
@@ -161,10 +240,6 @@ func (t *testCluster) GetDnStore(storeID string) (DnStore, error) {
 	return s, nil
 }
 
-func (t *testCluster) RegisterLogStore(stores ...LogStore) error {
-	return t.registerLogStores(stores...)
-}
-
 func (t *testCluster) GetLogStore(storeID string) (LogStore, error) {
 	t.log.Lock()
 	defer t.log.Unlock()
@@ -174,4 +249,59 @@ func (t *testCluster) GetLogStore(storeID string) (LogStore, error) {
 		return nil, wrappedError(ErrStoreNotExist, storeID)
 	}
 	return s, nil
+}
+
+func (t *testCluster) ListDnStores() []string {
+	ids := make([]string, 0, len(t.dn.stores))
+	for id := range t.dn.stores {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+func (t *testCluster) ListLogStores() []string {
+	ids := make([]string, 0, len(t.log.stores))
+	for id := range t.log.stores {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+func newDnStore() DnStore {
+	return &mockStore{}
+}
+
+func newLogStore() LogStore {
+	return &mockStore{}
+}
+
+type mockStore struct{}
+
+func (ms *mockStore) Start() error {
+	return nil
+}
+
+func (ms *mockStore) Stop() error {
+	return nil
+}
+
+func (ms *mockStore) ID() string {
+	return uuid.New().String()
+}
+
+func (ms *mockStore) IsLeaderHakeeper() (bool, uint64, error) {
+	return false, 0, nil
+}
+
+func (ms *mockStore) GetClusterState() (*logpb.CheckerState, error) {
+	return &logpb.CheckerState{}, nil
+
+}
+func (ms *mockStore) SetInitialClusterInfo(
+	numOfLogShards, numOfDNShards, numOfLogReplicas uint64,
+) error {
+	return nil
+}
+
+func (ms *mockStore) Bootstrap(term uint64, state *logpb.CheckerState) {
 }

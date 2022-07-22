@@ -1,20 +1,49 @@
 package testutil
 
-import (
-	"go.uber.org/zap/zapcore"
+const (
+	defaultDnStoreCount  = 1
+	defaultLogStoreCount = 1
+
+	defaultDnShardCount  = 1
+	defaultLogShardCount = 1
+
+	defaultLogReplicaNum = 3
 )
 
 type Options struct {
-	tmpDir        string
 	dnStoreCount  int
 	logStoreCount int
-	logLevel      zapcore.Level
-	// ......
+
+	dnShardCount  uint64
+	logShardCount uint64
+	logReplicaNum uint64
 }
 
-func DefaultOptions(dir string) Options {
+func DefaultOptions() Options {
 	return Options{
-		tmpDir: dir,
+		dnStoreCount:  defaultDnStoreCount,
+		logStoreCount: defaultLogStoreCount,
+		dnShardCount:  defaultDnShardCount,
+		logShardCount: defaultLogShardCount,
+		logReplicaNum: defaultLogReplicaNum,
+	}
+}
+
+func validateOptions(opt *Options) {
+	if opt.dnStoreCount == 0 {
+		opt.dnStoreCount = defaultDnStoreCount
+	}
+	if opt.logStoreCount == 0 {
+		opt.logStoreCount = defaultLogStoreCount
+	}
+	if opt.dnShardCount == 0 {
+		opt.dnShardCount = defaultDnShardCount
+	}
+	if opt.logShardCount == 0 {
+		opt.logShardCount = defaultLogShardCount
+	}
+	if opt.logReplicaNum == 0 {
+		opt.logReplicaNum = defaultLogReplicaNum
 	}
 }
 
@@ -28,8 +57,18 @@ func (opt Options) WithLogStoreCount(count int) Options {
 	return opt
 }
 
-func (opt Options) WithLogLevel(lvl zapcore.Level) Options {
-	opt.logLevel = lvl
+func (opt Options) WithLogShardCount(count uint64) Options {
+	opt.logShardCount = count
+	return opt
+}
+
+func (opt Options) WithDnShardCount(count uint64) Options {
+	opt.dnShardCount = count
+	return opt
+}
+
+func (opt Options) WithLogReplicaNum(num uint64) Options {
+	opt.logReplicaNum = num
 	return opt
 }
 
