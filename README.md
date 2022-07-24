@@ -55,4 +55,4 @@
 - [ ] 是否需要并发安全
 - [ ] FIX: get rid of Bootstrap, Service would do this job internally.
 - [x] FIX: start store first, then bootstrap
-- [ ] integration test directory path and name
+- [ ] integration test framwork directory path and name
